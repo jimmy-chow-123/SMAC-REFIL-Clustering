@@ -6,61 +6,54 @@ import torch.optim as optim
 from collections import deque
 import matplotlib.pyplot as plt
 
-# Import our custom environment (which implements bilateral team matching)
-from environment import DynamicTeamSC2Env
+# 修改导入：使用 environment.py 中的 SMACEnvironment
+from environment import SMACEnvironment
 
-# Hyperparameters
-OBS_DIM = 14             # Example: 2 (position) + 1 (health) + 1 (team id normalized) + 10 (hidden state)
-NUM_ACTIONS = 5          # Discrete actions (e.g., move directions and no_op)
-EMBED_DIM = 16           # Dimension of agent embedding for group loss
+# 超参数设置
+OBS_DIM = 14             # 例如：2（位置）+ 1（血量）+ 1（归一化团队ID）+ 10（隐藏状态）
+NUM_ACTIONS = 5          # 离散动作（例如：移动方向和 no_op）
+EMBED_DIM = 16           # 代理嵌入维度，用于组损失
 GAMMA = 0.99
 LR = 1e-3
 BATCH_SIZE = 16
 BUFFER_CAPACITY = 5000
 NUM_EPISODES = 200
-TARGET_UPDATE_FREQ = 10  # Episodes between target network updates
-LAMBDA = 0.5             # Weighting for the auxiliary group loss
+TARGET_UPDATE_FREQ = 10  # 每 TARGET_UPDATE_FREQ 轮更新一次目标网络
+LAMBDA = 0.5             # 辅助组损失权重
 
-# Epsilon-greedy parameters
+# Epsilon-greedy 参数
 EPS_START = 1.0
 EPS_END = 0.05
 EPS_DECAY = 0.995
 
-# For group embedding loss
-SIMILARITY_MARGIN = 0.5  # For agents in different groups, we want cosine similarity below this
+# 组嵌入损失参数：对于不同组，要求余弦相似度低于该阈值
+SIMILARITY_MARGIN = 0.5
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Agent Network: outputs both Q-values and an embedding vector.
+# 代理网络：输出 Q 值和嵌入向量
 class AgentNetwork(nn.Module):
     def __init__(self, input_dim, num_actions, embed_dim):
         super(AgentNetwork, self).__init__()
         self.fc1 = nn.Linear(input_dim, 64)
         self.fc2 = nn.Linear(64, 64)
-        # Q-value head
-        self.q_head = nn.Linear(64, num_actions)
-        # Embedding head (the "encoder" producing hidden representations for group factorization)
-        self.embed_head = nn.Linear(64, embed_dim)
+        self.q_head = nn.Linear(64, num_actions)      # Q 值分支
+        self.embed_head = nn.Linear(64, embed_dim)      # 嵌入分支
     
     def forward(self, x):
-        # x: (num_agents, input_dim)
         x = torch.relu(self.fc1(x))
         x = torch.relu(self.fc2(x))
-        q_vals = self.q_head(x)         # (num_agents, NUM_ACTIONS)
-        embeddings = self.embed_head(x)   # (num_agents, embed_dim)
-        # Normalize embeddings for cosine similarity
+        q_vals = self.q_head(x)
+        embeddings = self.embed_head(x)
         embeddings = nn.functional.normalize(embeddings, dim=1)
         return q_vals, embeddings
 
-# Replay Buffer storing transitions along with team assignments
+# 经验回放缓冲区，存储转换及团队信息
 class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
     
     def push(self, state, actions, reward, next_state, done, teams):
-        # state, next_state: np.array (num_agents, OBS_DIM)
-        # actions: np.array (num_agents,)
-        # reward: scalar, done: bool, teams: list of team assignments per agent
         self.buffer.append((state, actions, reward, next_state, done, teams))
     
     def sample(self, batch_size):
@@ -75,20 +68,19 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.buffer)
 
-# Compute total Q by summing each agent’s chosen Q values
+# 计算当前状态下所有代理所选动作的 Q 值之和
 def compute_total_q(net, state, actions):
-    # state: tensor (num_agents, OBS_DIM)
-    # actions: tensor (num_agents,)
     q_vals, _ = net(state)  # (num_agents, NUM_ACTIONS)
-    chosen_q = q_vals.gather(1, actions.unsqueeze(1)).squeeze(1)  # (num_agents,)
+    chosen_q = q_vals.gather(1, actions.unsqueeze(1)).squeeze(1)
     return chosen_q.sum()
 
+# 计算下个状态下所有代理的最大 Q 值之和
 def compute_total_max_q(net, next_state):
-    q_vals, _ = net(next_state)  # (num_agents, NUM_ACTIONS)
+    q_vals, _ = net(next_state)
     max_q, _ = q_vals.max(dim=1)
     return max_q.sum()
 
-# Epsilon-greedy action selection per agent
+# 每个代理的 epsilon-greedy 动作选择
 def select_actions(net, state, epsilon):
     num_agents = state.shape[0]
     state_tensor = torch.FloatTensor(state).to(DEVICE)
@@ -101,7 +93,7 @@ def select_actions(net, state, epsilon):
             actions.append(torch.argmax(q_vals[i]).item())
     return np.array(actions)
 
-# Group embedding loss L_SD: Encourages same-group embeddings to be similar, and different-group embeddings to be below a margin.
+# 计算组嵌入损失：同组希望余弦相似度接近 1，不同组则低于 SIMILARITY_MARGIN
 def compute_group_loss(embeddings, team_assignments):
     loss = 0.0
     count = 0
@@ -111,10 +103,8 @@ def compute_group_loss(embeddings, team_assignments):
             cos_sim = nn.functional.cosine_similarity(embeddings[i].unsqueeze(0),
                                                       embeddings[j].unsqueeze(0))
             if team_assignments[i] == team_assignments[j]:
-                # For same team: want cos_sim close to 1
                 loss += (1 - cos_sim)
             else:
-                # For different teams: penalize if similarity is above margin
                 loss += torch.relu(cos_sim - SIMILARITY_MARGIN)
             count += 1
     if count > 0:
@@ -123,11 +113,10 @@ def compute_group_loss(embeddings, team_assignments):
         return torch.tensor(0.0).to(DEVICE)
 
 def main():
-    # Initialize environment.
-    # Our environment implements dynamic team formation and returns team assignments in info['team_assignments'].
-    env = DynamicTeamSC2Env(map_name="2s3z", step_mul=8, render=True, team_capacity=3)
+    # 初始化环境，这里使用 SMACEnvironment（注意：不再传入 step_mul, render, team_capacity 参数）
+    env = SMACEnvironment(map_name="2s3z")
     
-    # Initialize online and target networks.
+    # 初始化在线网络和目标网络
     net = AgentNetwork(OBS_DIM, NUM_ACTIONS, EMBED_DIM).to(DEVICE)
     target_net = AgentNetwork(OBS_DIM, NUM_ACTIONS, EMBED_DIM).to(DEVICE)
     target_net.load_state_dict(net.state_dict())
@@ -140,7 +129,7 @@ def main():
     episode_rewards = []
     
     for episode in range(1, NUM_EPISODES + 1):
-        state = env.reset()  # state: np.array (num_agents, OBS_DIM)
+        state = env.reset()  # 初始状态：形状 (num_agents, OBS_DIM)
         done = False
         total_reward = 0.0
         step_count = 0
@@ -149,10 +138,13 @@ def main():
         while not done:
             num_agents = state.shape[0]
             actions = select_actions(net, state, epsilon)
-            next_state, reward, done, info = env.step(actions)
+            # SMACEnvironment.step 返回 (reward, done, info)
+            reward, done, info = env.step(actions)
+            # 通过 get_obs() 获取下一个状态
+            next_state = env.env.get_obs()
             total_reward += reward
             step_count += 1
-            # Obtain team assignments from environment info.
+            # 获取团队分配信息，如不存在则默认为所有智能体同一团队
             current_team_assignments = info.get("team_assignments", [0] * num_agents)
             replay_buffer.push(state, actions, reward, next_state, done, current_team_assignments)
             state = next_state
@@ -161,7 +153,6 @@ def main():
         print(f"Episode {episode} finished in {step_count} steps with reward {total_reward:.2f}")
         epsilon = max(EPS_END, epsilon * EPS_DECAY)
         
-        # Training updates when enough transitions have been stored.
         if len(replay_buffer) >= BATCH_SIZE:
             batch_states, batch_actions, batch_rewards, batch_next_states, batch_dones, batch_team_info = replay_buffer.sample(BATCH_SIZE)
             loss_total = 0.0
@@ -171,15 +162,14 @@ def main():
                 next_state_tensor = torch.FloatTensor(batch_next_states[i]).to(DEVICE)
                 reward = batch_rewards[i]
                 done_flag = batch_dones[i]
-                team_info = batch_team_info[i]  # list of team assignments for this transition
-
+                team_info = batch_team_info[i]
+                
                 current_q = compute_total_q(net, state_tensor, actions_tensor)
                 with torch.no_grad():
                     next_max_q = compute_total_max_q(target_net, next_state_tensor)
                     target_q = reward + GAMMA * next_max_q * (1 - done_flag)
                 td_loss = (current_q - target_q) ** 2
                 
-                # Auxiliary group loss from agent embeddings.
                 _, embeddings = net(state_tensor)
                 group_loss = compute_group_loss(embeddings, team_info)
                 
@@ -196,10 +186,8 @@ def main():
             print("Updated target network.")
     
     env.close()
-    
     torch.save(net.state_dict(), "best_model.pth")
     
-    # Plot reward convergence curve.
     plt.figure()
     plt.plot(episode_rewards, label="Episode Reward")
     plt.xlabel("Episode")

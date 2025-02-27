@@ -1,31 +1,21 @@
 import sys
 import os
+
+# 自动获取当前工作目录
+project_path = os.getcwd()
+if project_path not in sys.path:
+    sys.path.insert(0, project_path)
+
 os.environ['SC2PATH'] = '/Applications/StarCraft II'
 
-# 尝试直接修改 pysc2 内部的地图注册列表，去除重复项
-try:
-    import pysc2.maps.lib as maps_lib
-    if hasattr(maps_lib, "_REGISTERED_MAPS"):
-        reg = maps_lib._REGISTERED_MAPS
-        unique = {}
-        for m in reg:
-            # 如果已存在同名地图，则只保留第一次出现的
-            if m.name not in unique:
-                unique[m.name] = m
-        maps_lib._REGISTERED_MAPS = list(unique.values())
-        print("已移除重复的地图注册项")
-    else:
-        print("未找到 _REGISTERED_MAPS 属性，跳过重复检查")
-except Exception as e:
-    print("修改地图注册列表失败:", e)
 
-from smac.smac.env import StarCraft2Env
+from smac.env import StarCraft2Env
 
 class SMACEnvironment:
-    def __init__(self, map_name="3m"):
+    def __init__(self, map_name="2s3z"):
         self.env = StarCraft2Env(map_name=map_name)
         self.env_info = self.env.get_env_info()
-        print("环境信息:", self.env_info)
+        print("Environment info:", self.env_info)
     
     def reset(self):
         return self.env.reset()
@@ -38,9 +28,7 @@ class SMACEnvironment:
         self.env.close()
 
 if __name__ == "__main__":
-    print("Python executable:", sys.executable)
-    print("SC2PATH in Python:", os.environ.get('SC2PATH'))
-    env = SMACEnvironment(map_name="3m")
+    env = SMACEnvironment(map_name="2s3z")
     obs = env.reset()
     total_reward = 0
     terminated = False
@@ -50,5 +38,5 @@ if __name__ == "__main__":
         reward, terminated, _ = env.step(actions)
         total_reward += reward
 
-    print("本轮总奖励:", total_reward)
+    print("Total reward this episode:", total_reward)
     env.close()
