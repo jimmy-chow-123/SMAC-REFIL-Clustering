@@ -1,14 +1,4 @@
-import sys
-import os
-
-# 自动获取当前工作目录
-project_path = os.getcwd()
-if project_path not in sys.path:
-    sys.path.insert(0, project_path)
-
-os.environ['SC2PATH'] = '/Applications/StarCraft II'
-
-
+import random
 from smac.env import StarCraft2Env
 
 class SMACEnvironment:
@@ -34,7 +24,8 @@ if __name__ == "__main__":
     terminated = False
 
     while not terminated:
-        actions = [env.env.action_space.sample() for _ in range(env.env_info["n_agents"])]
+        # 由于 StarCraft2Env 没有 action_space 属性，这里改为根据 n_actions 随机采样动作
+        actions = [random.randrange(env.env_info["n_actions"]) for _ in range(env.env_info["n_agents"])]
         reward, terminated, _ = env.step(actions)
         total_reward += reward
 

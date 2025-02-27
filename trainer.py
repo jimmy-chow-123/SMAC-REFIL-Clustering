@@ -6,12 +6,11 @@ import torch.optim as optim
 from collections import deque
 import matplotlib.pyplot as plt
 
-# 修改导入：使用 environment.py 中的 SMACEnvironment
 from environment import SMACEnvironment
 
 # 超参数设置
-OBS_DIM = 14             # 例如：2（位置）+ 1（血量）+ 1（归一化团队ID）+ 10（隐藏状态）
-NUM_ACTIONS = 5          # 离散动作（例如：移动方向和 no_op）
+OBS_DIM = 80             # 使用环境的 obs_shape (80)
+NUM_ACTIONS = 11         # 修改为环境中 n_actions 的值，即 11
 EMBED_DIM = 16           # 代理嵌入维度，用于组损失
 GAMMA = 0.99
 LR = 1e-3
@@ -80,20 +79,26 @@ def compute_total_max_q(net, next_state):
     max_q, _ = q_vals.max(dim=1)
     return max_q.sum()
 
-# 每个代理的 epsilon-greedy 动作选择
-def select_actions(net, state, epsilon):
+# 修改后的 epsilon-greedy 动作选择，考虑可用动作
+def select_actions(net, state, epsilon, avail_actions):
     num_agents = state.shape[0]
     state_tensor = torch.FloatTensor(state).to(DEVICE)
-    q_vals, _ = net(state_tensor)
+    q_vals, _ = net(state_tensor)  # (num_agents, NUM_ACTIONS)
     actions = []
     for i in range(num_agents):
+        avail = avail_actions[i]  # 二值列表，长度为 NUM_ACTIONS
+        avail_indices = [j for j, flag in enumerate(avail) if flag == 1]
         if random.random() < epsilon:
-            actions.append(random.randrange(NUM_ACTIONS))
+            action = random.choice(avail_indices)
         else:
-            actions.append(torch.argmax(q_vals[i]).item())
+            masked_q = q_vals[i].clone()
+            for j in range(NUM_ACTIONS):
+                if avail[j] == 0:
+                    masked_q[j] = -float('inf')
+            action = torch.argmax(masked_q).item()
+        actions.append(action)
     return np.array(actions)
 
-# 计算组嵌入损失：同组希望余弦相似度接近 1，不同组则低于 SIMILARITY_MARGIN
 def compute_group_loss(embeddings, team_assignments):
     loss = 0.0
     count = 0
@@ -113,10 +118,8 @@ def compute_group_loss(embeddings, team_assignments):
         return torch.tensor(0.0).to(DEVICE)
 
 def main():
-    # 初始化环境，这里使用 SMACEnvironment（注意：不再传入 step_mul, render, team_capacity 参数）
     env = SMACEnvironment(map_name="2s3z")
     
-    # 初始化在线网络和目标网络
     net = AgentNetwork(OBS_DIM, NUM_ACTIONS, EMBED_DIM).to(DEVICE)
     target_net = AgentNetwork(OBS_DIM, NUM_ACTIONS, EMBED_DIM).to(DEVICE)
     target_net.load_state_dict(net.state_dict())
@@ -129,7 +132,8 @@ def main():
     episode_rewards = []
     
     for episode in range(1, NUM_EPISODES + 1):
-        state = env.reset()  # 初始状态：形状 (num_agents, OBS_DIM)
+        env.reset()
+        state = np.array(env.env.get_obs())
         done = False
         total_reward = 0.0
         step_count = 0
@@ -137,14 +141,12 @@ def main():
 
         while not done:
             num_agents = state.shape[0]
-            actions = select_actions(net, state, epsilon)
-            # SMACEnvironment.step 返回 (reward, done, info)
+            current_avail_actions = env.env.get_avail_actions()
+            actions = select_actions(net, state, epsilon, current_avail_actions)
             reward, done, info = env.step(actions)
-            # 通过 get_obs() 获取下一个状态
-            next_state = env.env.get_obs()
+            next_state = np.array(env.env.get_obs())
             total_reward += reward
             step_count += 1
-            # 获取团队分配信息，如不存在则默认为所有智能体同一团队
             current_team_assignments = info.get("team_assignments", [0] * num_agents)
             replay_buffer.push(state, actions, reward, next_state, done, current_team_assignments)
             state = next_state
